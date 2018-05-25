@@ -1,0 +1,86 @@
+#!/usr/bin/python
+
+# Include Some Modules
+import os
+import sys
+import string
+import subprocess
+import pexpect
+
+# Define Some Variables
+block_size = 1
+block_count = 1
+
+# Print the help
+def print_help():
+    print("No help available.")
+
+# Execute a command and return the output a line at a time
+def runCommand(cmd):
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    while(True):
+       rc = p.poll()
+       line = p.stdout.readline()
+       yield line
+       if( rc is not None ):
+           break
+
+if __name__ == '__main__':
+   if len(sys.argv) != 2:
+      print_help()
+      sys.exit()
+
+   filename = sys.argv[1]
+   gpfsdev = filename.split("/")[1]
+  
+   # Get the block size for the file system 
+   mmlsfs_cmd = "/usr/lpp/mmfs/bin/mmlsfs "+gpfsdev+" -B"
+   for line in runCommand(mmlsfs_cmd.split()):
+       if "-B" in line:
+          block_size = int(line.split()[1])
+
+   # Get the disk index numbers and their associated nsd names
+   mmlsdisk_cmd = "/usr/lpp/mmfs/bin/mmlsdisk "+gpfsdev+" -i"
+   disks = dict()
+   for line in runCommand(mmlsdisk_cmd.split()):
+       if line.find('nsd') != -1:
+          disks[line.split()[8]] = line.split()[0]
+
+   # Stat the file to get its inode number and file size.
+   # Using the size and file system block size, calculate the number of blocks the
+   # file is using.
+   fstats = os.stat(filename)
+   file_inode = int(fstats[1])
+   file_size = int(fstats[6])
+   block_count = int( ( file_size / block_size ) + 1 )
+
+   print filename,gpfsdev,block_size,file_inode,file_size,block_count
+   for idx in disks.keys():
+       print "idx: %s    nsd: %s" % ( idx, disks[idx] )
+   print
+   print
+
+   tsdbfs_cmd = "/usr/lpp/mmfs/bin/tsdbfs "+gpfsdev
+   tsdbfs_1 = "blockaddr "+str(file_inode)+" 0"
+   tsdbfs_2 = "iterate "+str(block_count)
+   child = pexpect.spawn( tsdbfs_cmd )
+   child.expect('Enter.*')
+   child.sendline(tsdbfs_1)
+   child.expect('Enter.*')
+   tsdbfs_out = child.before
+   child.sendline(tsdbfs_2)
+   child.expect('Enter.*')
+   tsdbfs_out += child.before
+   child.sendline('quit')
+   child.close()
+
+   print "%15s   %-10s   %10s" % ( "File Offset", "NSD Name", "NSD Block Address" )
+   for line in tsdbfs_out.split('\r\n'):
+       if line.find('Inode') != -1:
+          if line.find('Null') == -1:
+             if line.find('EOF') == -1:
+                faddr = line.split()[5]
+                dline = line.split()[7]
+                didx = dline.split(':')[0]
+                dadr = dline.split(':')[1]
+                print "%15s   %-10s   %10s" % ( faddr, disks[didx], dadr )
